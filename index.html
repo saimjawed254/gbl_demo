@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Apartment Complex // Interactive 3D BIM & Exploded View Explorer</title>
+  <meta name="description" content="Interactive 3D architectural viewer with GSAP-powered exploded views, floorplan inspection, and BIM walkthrough for apartment building and penthouse suite.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%2338bdf8'><path d='M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5'/></svg>">
+  <link rel="stylesheet" href="./src/style.css">
+</head>
+<body>
+  <!-- 3D Canvas -->
+  <canvas id="webgl-canvas"></canvas>
+
+  <!-- Loading Screen -->
+  <div id="loader-overlay" class="loader-overlay">
+    <div class="loader-content">
+      <div class="loader-blueprint-icon">
+        <svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M6 12L24 4L42 12L24 20L6 12Z" stroke-linejoin="round"/>
+          <path d="M6 24L24 32L42 24" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M6 36L24 44L42 36" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <h1 class="loader-title">APARTMENT RESIDENCES</h1>
+      <p class="loader-subtitle">INTERACTIVE BIM ARCHITECTURE DEMO</p>
+      
+      <div class="progress-bar-container">
+        <div id="loader-progress" class="progress-bar-fill"></div>
+      </div>
+      
+      <div class="loader-status-row">
+        <span id="loader-status-text">Initializing 3D Pipeline...</span>
+        <span id="loader-percentage">0%</span>
+      </div>
+
+      <div class="loader-hardware-note">
+        <span class="pulse-dot"></span>
+        Optimized for integrated graphics & 60 FPS playback
+      </div>
+    </div>
+  </div>
+
+  <!-- GSAP ScrollTrigger Storytelling Container (Scrub & Snapping) -->
+  <div id="scroll-container" class="scroll-container">
+    <!-- Scene 01: Skyline Arrival -->
+    <section class="scroll-section" id="sec-clouds" data-step="0">
+      <div class="story-card card-right">
+        <div class="story-tag-pill">ARCHITECTURE &amp; VISION</div>
+        <h2 class="story-title">The Skyline Monolith</h2>
+        <p class="story-desc">
+          A sculptural 13-story residential landmark crafted in post-tensioned architectural concrete and acoustic curtain-wall glazing, commanding panoramic views of the city horizon.
+        </p>
+        <div class="scroll-cue">
+          <div class="mouse-icon"><div class="mouse-wheel"></div></div>
+          <span>Scroll to explore structure</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Scene 02: Structural Anatomy -->
+    <section class="scroll-section" id="sec-explode" data-step="1">
+      <div class="story-card card-right">
+        <div class="story-tag-pill">SPATIAL COMPOSITION</div>
+        <h2 class="story-title">Structural Anatomy</h2>
+        <p class="story-desc">
+          An elevated architectural cutaway articulating the modular floorplates, reinforced central elevator core, and the cantilevered crown penthouse suspended above the urban grid.
+        </p>
+        <div class="scroll-cue">
+          <div class="mouse-icon"><div class="mouse-wheel"></div></div>
+          <span>Scroll to step inside</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Scene 03: Penthouse Residence -->
+    <section class="scroll-section" id="sec-interior" data-step="2">
+      <div class="story-card card-right">
+        <div class="story-tag-pill highlight">PRIVATE RESIDENCES</div>
+        <h2 class="story-title">Grand Living Salon</h2>
+        <p class="story-desc">
+          The pinnacle penthouse residence — featuring bespoke millwork, floor-to-ceiling terrace horizons, and fluid room-to-room navigation across all private quarters.
+        </p>
+        <div class="story-status-badge">
+          <span class="status-pulse-dot"></span>
+          <span>Residence Tour Active &bull; Select Doorways to Navigate</span>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- Floating Right-Side Story Milestone Navigator -->
+  <aside class="story-nav" id="story-nav">
+    <button class="story-step-btn active" data-step="0" title="Scene 1: The Skyline Monolith">
+      <span class="step-num">01</span>
+      <span class="step-label">Skyline</span>
+    </button>
+    <div class="story-step-line"></div>
+    <button class="story-step-btn" data-step="1" title="Scene 2: Structural Anatomy">
+      <span class="step-num">02</span>
+      <span class="step-label">Anatomy</span>
+    </button>
+    <div class="story-step-line"></div>
+    <button class="story-step-btn" data-step="2" title="Scene 3: Grand Living Salon">
+      <span class="step-num">03</span>
+      <span class="step-label">Penthouse</span>
+    </button>
+  </aside>
+
+  <!-- Main UI Header -->
+  <header class="app-header">
+    <div class="header-brand">
+      <div class="brand-badge">BIM 3D</div>
+      <div>
+        <h2 class="project-name">Apartment Complex</h2>
+        <span class="project-tagline">Main Building &amp; Penthouse Floor</span>
+      </div>
+    </div>
+
+    <!-- Center Mode Badges -->
+    <div class="header-stats">
+      <div class="stat-pill">
+        <span class="stat-dot green"></span>
+        <span class="stat-label">POLYS:</span>
+        <span class="stat-val">3.64M</span>
+      </div>
+      <div class="stat-pill">
+        <span class="stat-dot blue"></span>
+        <span class="stat-label">DRAW CALLS:</span>
+        <span class="stat-val">OPTIMIZED</span>
+      </div>
+      <div class="stat-pill" id="fps-badge">
+        <span class="stat-label">FPS:</span>
+        <span class="stat-val" id="fps-counter">60</span>
+      </div>
+    </div>
+
+    <!-- Header Actions (Lighting & Reset) -->
+    <div class="header-controls">
+      <div class="segmented-control" id="lighting-selector">
+        <button class="seg-btn active" data-light="day" id="btn-light-day" title="Daylight">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+          Day
+        </button>
+        <button class="seg-btn" data-light="sunset" id="btn-light-sunset" title="Golden Hour">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 18a5 5 0 0 0-10 0"/><line x1="12" y1="9" x2="12" y2="2"/><line x1="4.22" y1="10.22" x2="5.64" y2="11.64"/><line x1="1" y1="18" x2="3" y2="18"/><line x1="21" y1="18" x2="23" y2="18"/><line x1="18.36" y1="11.64" x2="19.78" y2="10.22"/><line x1="23" y1="22" x2="1" y2="22"/></svg>
+          Sunset
+        </button>
+        <button class="seg-btn" data-light="night" id="btn-light-night" title="Night Architecture">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          Night
+        </button>
+      </div>
+
+      <button id="btn-reset-view" class="icon-btn" title="Reset View">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- Floating Control Panel (Left Side - 100% Synced to Scroll) -->
+  <aside class="control-panel" id="main-control-panel">
+    <!-- Section 1: Story Chapters (100% Synced to Scroll) -->
+    <div class="panel-section">
+      <div class="section-header">
+        <span class="section-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+          Story Journey
+        </span>
+        <span class="section-tag">SYNCED</span>
+      </div>
+      <div class="camera-grid single-col">
+        <button class="cam-btn active" id="chapter-0" data-chapter="0">
+          <div class="cam-name">01 Skyline</div>
+          <span class="cam-desc">Sky Horizon &amp; Architecture Monolith</span>
+        </button>
+        <button class="cam-btn" id="chapter-1" data-chapter="1">
+          <div class="cam-name">02 Anatomy</div>
+          <span class="cam-desc">Elevated Structural Cutaway &amp; Core</span>
+        </button>
+        <button class="cam-btn" id="chapter-2" data-chapter="2">
+          <div class="cam-name">03 Penthouse</div>
+          <span class="cam-desc">Grand Living Salon &amp; Suite Tour</span>
+        </button>
+      </div>
+    </div>
+
+  </aside>
+
+  <!-- Interactive Hotspot Card / Modal -->
+  <div class="hotspot-card" id="hotspot-card">
+    <button class="hotspot-close" id="btn-close-card">&times;</button>
+    <div class="hotspot-badge" id="card-badge">HOTSPOT // LEVEL 13</div>
+    <h3 class="hotspot-title" id="card-title">Luxury Penthouse Floor</h3>
+    <p class="hotspot-desc" id="card-desc">
+      Features private furnished layout with master bedroom, custom kitchen cabinetry, dining terrace, and high-ceiling glass facade.
+    </p>
+    <div class="hotspot-specs" id="card-specs">
+      <div class="spec-item">
+        <span class="spec-label">Area</span>
+        <span class="spec-value">480 m²</span>
+      </div>
+      <div class="spec-item">
+        <span class="spec-label">Height</span>
+        <span class="spec-value">34.3 m</span>
+      </div>
+      <div class="spec-item">
+        <span class="spec-label">Status</span>
+        <span class="spec-value highlight">Furnished</span>
+      </div>
+    </div>
+    <button class="card-action-btn" id="card-action-btn">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6M14 10l6.1-6.1M9 21H3v-6M10 14l-6.1 6.1"/></svg>
+      Focus Camera Here
+    </button>
+  </div>
+
+  <!-- Google Street View Style Penthouse Walkthrough Dock -->
+  <div id="walkthrough-dock" class="walkthrough-dock">
+    <div class="walkthrough-header-bar">
+      <div class="walkthrough-room-info">
+        <span class="walkthrough-tag">INTERIOR WALKTHROUGH // STREET VIEW MODE</span>
+        <h3 class="walkthrough-room-title" id="wt-room-title">1. Entrance Foyer</h3>
+        <p class="walkthrough-room-desc" id="wt-room-desc">Spacious entry corridor connecting living hall and bedrooms.</p>
+      </div>
+      <button id="btn-exit-walkthrough" class="walkthrough-exit-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        Exit to Aerial
+      </button>
+    </div>
+
+    <!-- Room / Space Selection Pills (All 9 Rooms in Penthouse + Lifts & Stairs) -->
+    <div class="walkthrough-pills-row" id="wt-pills-row">
+      <button class="room-pill-btn active" data-node="flatA_living">🛋️ Living & Dining</button>
+      <button class="room-pill-btn" data-node="flatA_kitchen">🍳 Gourmet Kitchen</button>
+      <button class="room-pill-btn" data-node="flatA_terrace">🌅 Balcony Terrace</button>
+      <button class="room-pill-btn" data-node="flatA_master">🛏️ Master Suite</button>
+      <button class="room-pill-btn" data-node="flatA_ensuite">🚿 Master Ensuite</button>
+      <button class="room-pill-btn" data-node="flatA_bed2">🛌 Bedroom 2</button>
+      <button class="room-pill-btn" data-node="flatA_bed3">📚 Study / Bed 3</button>
+      <button class="room-pill-btn" data-node="flatA_bath">🛁 Family Bath</button>
+      <button class="room-pill-btn" data-node="flatA_powder">🚽 Powder Room</button>
+      <button class="room-pill-btn" data-node="hallway_core">🛗 Lift Lobby</button>
+      <button class="room-pill-btn" data-node="stair_core">🪜 Stairwell</button>
+    </div>
+
+    <!-- Path Navigation Row & Scrubber -->
+    <div class="walkthrough-nav-row">
+      <button id="btn-prev-room" class="nav-arrow-btn" title="Previous Room">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+      </button>
+      <div class="path-slider-wrap">
+        <input type="range" id="path-slider" min="0" max="10" step="1" value="0">
+        <div class="path-slider-labels">
+          <span>Living</span>
+          <span>Kitchen</span>
+          <span>Terrace</span>
+          <span>Master</span>
+          <span>Ensuite</span>
+          <span>Bed 2</span>
+          <span>Study</span>
+          <span>Bath</span>
+          <span>Powder</span>
+          <span>Lobby</span>
+          <span>Stairs</span>
+        </div>
+      </div>
+      <button id="btn-next-room" class="nav-arrow-btn" title="Next Room">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+      </button>
+    </div>
+
+    <!-- Free Walking Controls Row (D-Pad buttons & instructions) -->
+    <div class="walkthrough-controls-row">
+      <div class="dpad-cluster">
+        <button id="btn-walk-left" class="dpad-btn" title="Turn Left (A / Left Arrow)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+          <span>Left</span>
+        </button>
+        <div class="dpad-vertical">
+          <button id="btn-walk-forward" class="dpad-btn primary-dpad" title="Walk Forward (W / Up Arrow)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+            <span>Walk Forward</span>
+          </button>
+          <button id="btn-walk-backward" class="dpad-btn" title="Walk Back (S / Down Arrow)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M19 12l-7 7-7-7"/></svg>
+            <span>Back</span>
+          </button>
+        </div>
+        <button id="btn-walk-right" class="dpad-btn" title="Turn Right (D / Right Arrow)">
+          <span>Right</span>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </button>
+      </div>
+
+      <div class="streetview-helper-badge">
+        <span class="wasd-badge">W A S D</span> Walk freely • Click <strong class="badge-blue-door-mark">Blue Door Marks 🚪</strong> to enter rooms • Drag mouse to look 360°
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom Navigation Helper / Onboarding Tips -->
+  <footer class="app-footer">
+    <div class="help-tip">
+      <span class="key-badge">L-Click + Drag</span> Orbit
+    </div>
+    <div class="help-tip">
+      <span class="key-badge">R-Click / Shift+Drag</span> Pan
+    </div>
+    <div class="help-tip">
+      <span class="key-badge">Scroll</span> Zoom
+    </div>
+    <div class="help-tip highlight-tip">
+      <span class="key-badge">Hotspots</span> Click glowing pins in 3D
+    </div>
+  </footer>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
