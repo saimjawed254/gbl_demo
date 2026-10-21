@@ -255,7 +255,7 @@ let sunVector = new THREE.Vector3();
 const ambientLight = new THREE.AmbientLight('#fa9b70', 0.25);
 scene.add(ambientLight);
 
-const hemiLight = new THREE.HemisphereLight('#f7a474', '#4a443a', 0.38);
+const hemiLight = new THREE.HemisphereLight('#f7a474', '#ded7cc', 0.45);
 hemiLight.position.set(0, 80, 0);
 scene.add(hemiLight);
 
@@ -656,10 +656,10 @@ const structuralColumnMat = new THREE.MeshStandardMaterial({
 
 // 6. Penthouse Interior Walls - Velvet Italian Cashmere Venetian Plaster
 const interiorWallMat = new THREE.MeshStandardMaterial({
-  color: new THREE.Color('#b5ab9d'),
-  roughness: 0.62,
+  color: new THREE.Color('#ede8df'), // Exact match to French Moleanos alabaster limestone walls
+  roughness: 0.48,
   metalness: 0.02,
-  envMapIntensity: 0.12,
+  envMapIntensity: 0.45,
   side: THREE.DoubleSide
 });
 
@@ -674,10 +674,12 @@ const floorSlabMat = new THREE.MeshStandardMaterial({
 
 // Dedicated Luxury Architectural Roof & Penthouse Ceiling Material (Exact match to interior walls, Double-Sided)
 const roofCeilingSlabMat = new THREE.MeshStandardMaterial({
-  color: new THREE.Color('#b5ab9d'), // Exact same color as interior walls (#b5ab9d)
-  roughness: 0.62,
+  color: new THREE.Color('#ede8df'), // Exact same color as interior walls (#ede8df)
+  emissive: new THREE.Color('#ede8df'),
+  emissiveIntensity: 0.35, // Compensates for downward-facing orientation in interior space
+  roughness: 0.48,
   metalness: 0.02,
-  envMapIntensity: 0.12,
+  envMapIntensity: 0.45,
   side: THREE.DoubleSide // 100% visible from above (roof terrace) and below (room interior ceiling)
 });
 
@@ -1875,9 +1877,9 @@ function applyLuxuryMaterial(mat, fullName, isInterior) {
     return facadeSpandrelMat;
   }
 
-  // 19. Roof Slab & Penthouse Interior Ceiling (Identical material to interior walls)
+  // 19. Roof Slab & Penthouse Interior Ceiling (Exact match to interior walls)
   if (hierarchy.includes('566343') || (hierarchy.includes('roof') && hierarchy.includes('floor'))) {
-    return interiorWallMat;
+    return roofCeilingSlabMat;
   }
 
   // 20. Precast Architectural Floor Slabs & Balcony Decks
@@ -1895,7 +1897,7 @@ function applyLuxuryMaterial(mat, fullName, isInterior) {
   mat.side = THREE.FrontSide;
   if (mat.color) {
     if (mat.color.r > 0.82 && mat.color.g > 0.82 && mat.color.b > 0.82) {
-      mat.color.setRGB(0.72, 0.69, 0.64);
+      mat.color.setRGB(237/255, 232/255, 223/255); // French Moleanos alabaster #ede8df
     }
   }
   mat.roughness = Math.max(mat.roughness || 0.45, 0.42);
