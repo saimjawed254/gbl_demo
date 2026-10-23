@@ -1,7 +1,17 @@
 import * as THREE from 'three';
+import * as THREEGPU from 'three/webgpu';
+import { WebGPUPathTracer } from 'three-gpu-pathtracer/webgpu';
 window.THREE = THREE;
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
+import { HDRLoader } from 'three/examples/jsm/loaders/HDRLoader.js';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js';
+import { SMAAPass } from 'three/examples/jsm/postprocessing/SMAAPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { Sky } from 'three/addons/objects/Sky.js';
 import { gsap } from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger.js';
@@ -184,10 +194,13 @@ const renderer = new THREE.WebGLRenderer({
   powerPreference: 'high-performance'
 });
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 0.96;
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.0));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.AgXToneMapping;
+renderer.toneMappingExposure = 1.1;
 renderer.shadowMap.enabled = true;
+// Three.js r186 removed the old PCFSoftShadowMap implementation; PCFShadowMap
+// is the supported filtered shadow path for this WebGL renderer.
 renderer.shadowMap.type = THREE.PCFShadowMap;
 renderer.shadowMap.autoUpdate = false;
 renderer.shadowMap.needsUpdate = true;
@@ -196,6 +209,7 @@ const scene = new THREE.Scene();
 scene.environmentIntensity = 0.45;
 // Atmospheric aerial fog matching dynamic sky horizon (sunset default)
 scene.fog = new THREE.FogExp2('#523242', 0.0012);
+const exteriorFog = scene.fog;
 
 // Camera starts at heroic architectural perspective for Stage 01 Monolith
 // High-precision near/far ratio (0.3m to 4000m = 13,333 ratio vs previous 200,000) eliminates all Revit wall Z-fighting
@@ -216,6 +230,104 @@ controls.maxDistance = 450;
 // Disable mouse-wheel zoom so native page scrolling smoothly drives GSAP scrub & snapping
 controls.enableZoom = false;
 controls.target.set(0, 22, 0);
+
+const composer = new EffectComposer(renderer);
+const renderPass = new RenderPass(scene, camera);
+const gtaoPass = new GTAOPass(scene, camera, window.innerWidth, window.innerHeight);
+gtaoPass.output = GTAOPass.OUTPUT.Default;
+gtaoPass.blendIntensity = 0.62;
+gtaoPass.pdRadiusExponent = 2.0;
+gtaoPass.pdSamples = 6;
+gtaoPass.radius = 0.55;
+gtaoPass.distanceExponent = 1.35;
+gtaoPass.thickness = 1.15;
+gtaoPass.scale = 1.0;
+const smaaPass = new SMAAPass(window.innerWidth * renderer.getPixelRatio(), window.innerHeight * renderer.getPixelRatio());
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  0.045,
+  0.35,
+  0.9
+);
+const outputPass = new OutputPass();
+composer.addPass(renderPass);
+composer.addPass(gtaoPass);
+composer.addPass(smaaPass);
+composer.addPass(bloomPass);
+composer.addPass(outputPass);
+
+let isInteriorRendering = false;
+let interiorEnvironment = null;
+let interiorBackground = null;
+let useInteriorPostProcessing = true;
+let webgpuPathTracer = null;
+let webgpuPathTracerRenderer = null;
+let webgpuPathTracerCanvas = null;
+let webgpuPathTracerReady = false;
+const enableWebGPUPathTracing = false;
+const lastPathTracerCameraPosition = new THREE.Vector3();
+const lastPathTracerCameraQuaternion = new THREE.Quaternion();
+let hasPathTracerCameraState = false;
+// Narrow, neutral daylight entering from the living-room window direction.
+// The tighter frustum keeps contact shadows readable without covering the whole building.
+const interiorKeyLight = new THREE.DirectionalLight('#fff9ed', 2.2);
+interiorKeyLight.position.set(-30, 43, 18);
+interiorKeyLight.target.position.set(-1, 32.2, -1);
+interiorKeyLight.castShadow = true;
+interiorKeyLight.shadow.mapSize.set(2048, 2048);
+interiorKeyLight.shadow.camera.near = 0.5;
+interiorKeyLight.shadow.camera.far = 95;
+interiorKeyLight.shadow.camera.left = -26;
+interiorKeyLight.shadow.camera.right = 26;
+interiorKeyLight.shadow.camera.top = 28;
+interiorKeyLight.shadow.camera.bottom = -28;
+interiorKeyLight.shadow.bias = -0.0001;
+interiorKeyLight.shadow.normalBias = 0.008;
+interiorKeyLight.visible = false;
+scene.add(interiorKeyLight, interiorKeyLight.target);
+
+const interiorWarmFill = new THREE.PointLight('#fff8ef', 0.16, 34, 2);
+interiorWarmFill.position.set(2, 38, -4);
+interiorWarmFill.visible = false;
+scene.add(interiorWarmFill);
+
+const interiorCoolFill = new THREE.HemisphereLight('#f3f6ff', '#71685e', 0.1);
+interiorCoolFill.visible = false;
+scene.add(interiorCoolFill);
+
+async function initializeWebGPUPathTracer() {
+  if (!enableWebGPUPathTracing || !navigator.gpu || webgpuPathTracerReady) return;
+
+  try {
+    webgpuPathTracerCanvas = document.createElement('canvas');
+    webgpuPathTracerCanvas.style.cssText = 'position:fixed;inset:0;width:100vw;height:100vh;z-index:2;pointer-events:none;display:none;';
+    document.body.appendChild(webgpuPathTracerCanvas);
+
+    webgpuPathTracerRenderer = new THREEGPU.WebGPURenderer({
+      canvas: webgpuPathTracerCanvas,
+      antialias: false,
+      powerPreference: 'high-performance'
+    });
+    webgpuPathTracerRenderer.setPixelRatio(Math.min(window.devicePixelRatio, 1));
+    webgpuPathTracerRenderer.setSize(window.innerWidth, window.innerHeight);
+    webgpuPathTracerRenderer.outputColorSpace = THREEGPU.SRGBColorSpace;
+    webgpuPathTracerRenderer.toneMapping = THREEGPU.AgXToneMapping;
+    webgpuPathTracerRenderer.toneMappingExposure = 0.9;
+    await webgpuPathTracerRenderer.init();
+
+    webgpuPathTracer = new WebGPUPathTracer(webgpuPathTracerRenderer);
+    webgpuPathTracer.maxBounces = 8;
+    webgpuPathTracer.renderDelay = 250;
+    webgpuPathTracer.minSamples = 1;
+    webgpuPathTracerReady = true;
+  } catch (error) {
+    webgpuPathTracerRenderer?.dispose();
+    webgpuPathTracerCanvas?.remove();
+    webgpuPathTracerRenderer = null;
+    webgpuPathTracerCanvas = null;
+    console.warn('WebGPU path tracing unavailable; using the WebGL interior renderer.', error);
+  }
+}
 
 // Building Hierarchy Groups
 
@@ -1038,7 +1150,14 @@ const pmremGenerator = new THREE.PMREMGenerator(renderer);
 pmremGenerator.compileEquirectangularShader();
 
 function updateEnvironmentMap() {
+  if (isInteriorRendering && interiorEnvironment) {
+    scene.environment = interiorEnvironment;
+    scene.environmentIntensity = 0.22;
+    scene.background = null;
+    return;
+  }
   if (!sky) return;
+  scene.background = null;
   const envScene = new THREE.Scene();
   const skyClone = new Sky();
   skyClone.scale.setScalar(3500);
@@ -1062,6 +1181,21 @@ function updateEnvironmentMap() {
   scene.environment = renderTarget.texture;
   scene.environmentIntensity = 0.45;
 }
+
+const hdrLoader = new HDRLoader();
+hdrLoader.load(
+  `${modelBase}hdri/hotel_room_1k.hdr`,
+  (texture) => {
+    texture.mapping = THREE.EquirectangularReflectionMapping;
+    interiorBackground = texture;
+    interiorEnvironment = pmremGenerator.fromEquirectangular(texture).texture;
+    if (isInteriorRendering) updateEnvironmentMap();
+  },
+  undefined,
+  (error) => {
+    console.warn('Interior HDRI could not be loaded; procedural environment remains active.', error);
+  }
+);
 
 setupAtmosphericSky();
 updateEnvironmentMap();
@@ -1593,6 +1727,7 @@ function setLightingMode(mode) {
 
   if (!sky) return;
   const skyUniforms = sky.material.uniforms;
+  const activeFog = scene.fog;
 
   if (mode === 'day') {
     const phi = THREE.MathUtils.degToRad(90 - 38);
@@ -1604,8 +1739,10 @@ function setLightingMode(mode) {
     skyUniforms['mieCoefficient'].value = 0.003;
     skyUniforms['mieDirectionalG'].value = 0.82;
 
-    gsap.to(scene.fog.color, { r: 210/255, g: 227/255, b: 245/255, duration, ease });
-    scene.fog.density = 0.00065;
+    if (activeFog) {
+      gsap.to(activeFog.color, { r: 210/255, g: 227/255, b: 245/255, duration, ease });
+      activeFog.density = 0.00065;
+    }
 
     gsap.to(sunLight.color, { r: 1.0, g: 0.965, b: 0.91, duration, ease });
     gsap.to(sunLight, { intensity: 1.30, duration, ease });
@@ -1637,8 +1774,10 @@ function setLightingMode(mode) {
     skyUniforms['rayleigh'].value = 3.6;
     skyUniforms['mieCoefficient'].value = 0.008;
 
-    gsap.to(scene.fog.color, { r: 82/255, g: 50/255, b: 66/255, duration, ease });
-    scene.fog.density = 0.0012;
+    if (activeFog) {
+      gsap.to(activeFog.color, { r: 82/255, g: 50/255, b: 66/255, duration, ease });
+      activeFog.density = 0.0012;
+    }
 
     gsap.to(sunLight.color, { r: 1.0, g: 0.54, b: 0.26, duration, ease });
     gsap.to(sunLight, { intensity: 1.8, duration, ease });
@@ -1670,8 +1809,10 @@ function setLightingMode(mode) {
     skyUniforms['rayleigh'].value = 0.35;
     skyUniforms['mieCoefficient'].value = 0.001;
 
-    gsap.to(scene.fog.color, { r: 10/255, g: 14/255, b: 24/255, duration, ease });
-    scene.fog.density = 0.0014;
+    if (activeFog) {
+      gsap.to(activeFog.color, { r: 10/255, g: 14/255, b: 24/255, duration, ease });
+      activeFog.density = 0.0014;
+    }
 
     gsap.to(sunLight.color, { r: 0.28, g: 0.42, b: 0.68, duration, ease });
     gsap.to(sunLight, { intensity: 0.35, duration, ease });
@@ -1694,6 +1835,14 @@ function setLightingMode(mode) {
     renderer.toneMappingExposure = 1.02;
   }
 
+  if (isInteriorRendering) {
+    const interiorSunIntensity = mode === 'day' ? 2.2 : mode === 'sunset' ? 0.7 : 0.12;
+    const interiorFillIntensity = mode === 'day' ? 0.18 : mode === 'sunset' ? 0.12 : 0.08;
+    interiorKeyLight.intensity = interiorSunIntensity;
+    interiorWarmFill.intensity = interiorFillIntensity;
+    interiorCoolFill.intensity = mode === 'day' ? 0.1 : 0.08;
+  }
+
   renderer.shadowMap.needsUpdate = true;
   setTimeout(() => { renderer.shadowMap.needsUpdate = true; }, 300);
   setTimeout(() => { renderer.shadowMap.needsUpdate = true; }, duration * 1000);
@@ -1703,6 +1852,36 @@ function setLightingMode(mode) {
 
 window.setLightingMode = setLightingMode;
 
+function setInteriorRenderingEnabled(enabled) {
+  isInteriorRendering = enabled;
+  interiorKeyLight.visible = enabled;
+  interiorWarmFill.visible = enabled;
+  interiorCoolFill.visible = enabled;
+  scene.environment = enabled && interiorEnvironment ? interiorEnvironment : null;
+  scene.environmentIntensity = enabled && interiorEnvironment ? 0.22 : 0.45;
+  scene.background = null;
+  renderer.toneMappingExposure = enabled ? 0.94 : 1.02;
+  scene.fog = enabled ? null : exteriorFog;
+  bloomPass.enabled = enabled && useInteriorPostProcessing;
+  gtaoPass.enabled = enabled && useInteriorPostProcessing;
+  smaaPass.enabled = enabled && useInteriorPostProcessing;
+  if (!enabled) updateEnvironmentMap();
+  renderer.shadowMap.needsUpdate = true;
+}
+
+function prepareSceneForWebGPUPathTracing() {
+  scene.traverse((object) => {
+    if (!object.isMesh || !object.material) return;
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    materials.forEach((material) => {
+      if (!material.color) material.color = new THREE.Color(1, 1, 1);
+      if (!Number.isFinite(material.roughness)) material.roughness = 0.5;
+      if (!Number.isFinite(material.metalness)) material.metalness = 0;
+      if (!Number.isFinite(material.ior)) material.ior = 1.5;
+    });
+  });
+}
+
 // =============================================================================
 // 3. GLTF LOADER & LUXURY MATERIAL ASSIGNMENT PIPELINE
 // =============================================================================
@@ -1711,11 +1890,14 @@ const loaderProgress = document.getElementById('loader-progress');
 const loaderStatusText = document.getElementById('loader-status-text');
 const loaderPercentage = document.getElementById('loader-percentage');
 
+const dracoLoader = new DRACOLoader();
+dracoLoader.setDecoderPath(`${modelBase}draco/`);
 const gltfLoader = new GLTFLoader();
+gltfLoader.setDRACOLoader(dracoLoader);
 
 let buildingLoaded = 0;
 let topFloorLoaded = 0;
-const totalExpected = 48206288;
+const totalExpected = 80000000;
 
 function updateProgress() {
   const total = buildingLoaded + topFloorLoaded;
@@ -1900,14 +2082,14 @@ function applyLuxuryMaterial(mat, fullName, isInterior) {
       mat.color.setRGB(237/255, 232/255, 223/255); // French Moleanos alabaster #ede8df
     }
   }
-  mat.roughness = Math.max(mat.roughness || 0.45, 0.42);
-  mat.metalness = Math.min(mat.metalness || 0.04, 0.2);
+  if (!Number.isFinite(mat.roughness)) mat.roughness = 0.45;
+  if (!Number.isFinite(mat.metalness)) mat.metalness = 0.04;
   mat.envMapIntensity = 0.25;
   return mat;
 }
 
 // Procedural Vertex Normal & Triplanar Box UV Generator for CAD/BIM Meshes
-function ensureMeshNormalsAndUVs(mesh, fullName) {
+function ensureMeshNormalsAndUVs(mesh, fullName, preserveMaterials = false) {
   if (!mesh || !mesh.geometry) return;
   const geo = mesh.geometry;
 
@@ -1915,12 +2097,13 @@ function ensureMeshNormalsAndUVs(mesh, fullName) {
     geo.computeVertexNormals();
   }
 
-  const forceRecalcUV =
+  const forceRecalcUV = !preserveMaterials && (
     fullName.includes('exwall') ||
     fullName.includes('parapet') ||
     fullName.includes('spandrel') ||
     fullName.includes('exterior') ||
-    fullName.includes('precast');
+    fullName.includes('precast')
+  );
 
   if ((!geo.attributes.uv || forceRecalcUV) && geo.attributes.position) {
     const pos = geo.attributes.position;
@@ -1962,8 +2145,10 @@ function ensureMeshNormalsAndUVs(mesh, fullName) {
   }
 }
 
-function setupMeshProperties(mesh, isInterior = false) {
+function setupMeshProperties(mesh, isInterior = false, preserveMaterials = false) {
   mesh.frustumCulled = true;
+  mesh.castShadow = isInterior;
+  mesh.receiveShadow = true;
 
   const fullName = getFullHierarchyName(mesh);
   const meshName = (mesh.name || '').toLowerCase();
@@ -1984,7 +2169,7 @@ function setupMeshProperties(mesh, isInterior = false) {
     }
   }
 
-  ensureMeshNormalsAndUVs(mesh, fullName);
+  ensureMeshNormalsAndUVs(mesh, fullName, preserveMaterials);
 
   if (!mesh.material) return;
 
@@ -1992,10 +2177,33 @@ function setupMeshProperties(mesh, isInterior = false) {
     exteriorWalls.push(mesh);
   }
 
-  if (Array.isArray(mesh.material)) {
-    mesh.material = mesh.material.map(m => applyLuxuryMaterial(m, fullName, isInterior));
+  if (!preserveMaterials) {
+    if (Array.isArray(mesh.material)) {
+      mesh.material = mesh.material.map(m => applyLuxuryMaterial(m, fullName, isInterior));
+    } else {
+      mesh.material = applyLuxuryMaterial(mesh.material, fullName, isInterior);
+    }
   } else {
-    mesh.material = applyLuxuryMaterial(mesh.material, fullName, isInterior);
+    const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    materials.forEach((material) => {
+      if (!material.color) material.color = new THREE.Color(1, 1, 1);
+      if (!Number.isFinite(material.roughness)) material.roughness = 0.5;
+      if (!Number.isFinite(material.metalness)) material.metalness = 0;
+      if (!Number.isFinite(material.ior)) material.ior = 1.5;
+      if (isInterior) {
+        const maxAnisotropy = renderer.capabilities.getMaxAnisotropy();
+        [
+          material.map,
+          material.normalMap,
+          material.roughnessMap,
+          material.metalnessMap,
+          material.aoMap,
+          material.emissiveMap
+        ].forEach((texture) => {
+          if (texture) texture.anisotropy = Math.min(maxAnisotropy, 4);
+        });
+      }
+    });
   }
 
   // Directional shadows only on major exterior structures to maintain 60 FPS
@@ -2007,8 +2215,386 @@ function setupMeshProperties(mesh, isInterior = false) {
     fullName.includes('exwall') ||
     fullName.includes('column')
   );
-  mesh.castShadow = isExteriorStructure;
-  mesh.receiveShadow = !isGlass;
+  if (!isInterior) {
+    mesh.castShadow = isExteriorStructure;
+    mesh.receiveShadow = !isGlass;
+  }
+}
+
+function createArtworkTexture(index) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 512;
+  const context = canvas.getContext('2d');
+  const palettes = [
+    ['#d8c4a7', '#6e4f3a', '#233c46'],
+    ['#eee8dc', '#b34f35', '#1d3342'],
+    ['#c7d1cf', '#304c50', '#bd8e52'],
+    ['#e6d7c2', '#7b3038', '#252a3b'],
+    ['#d2d7d1', '#465e4b', '#b47745'],
+    ['#e2d6ca', '#272d38', '#bca36d']
+  ];
+  const [base, accent, shadow] = palettes[index % palettes.length];
+  context.fillStyle = base;
+  context.fillRect(0, 0, 512, 512);
+
+  const gradient = context.createLinearGradient(0, 0, 512, 512);
+  gradient.addColorStop(0, accent);
+  gradient.addColorStop(1, shadow);
+  context.globalAlpha = 0.86;
+  context.fillStyle = gradient;
+  context.beginPath();
+  context.moveTo(0, 360);
+  context.bezierCurveTo(130, 180, 280, 470, 512, 120);
+  context.lineTo(512, 512);
+  context.lineTo(0, 512);
+  context.closePath();
+  context.fill();
+
+  context.globalAlpha = 0.34;
+  context.strokeStyle = '#fffaf0';
+  context.lineWidth = 7;
+  for (let line = -2; line < 8; line += 1) {
+    context.beginPath();
+    context.moveTo(line * 110, 0);
+    context.lineTo(line * 110 + 260, 512);
+    context.stroke();
+  }
+  context.globalAlpha = 0.72;
+  const sunX = 110 + (index % 3) * 145;
+  const sunY = 120 + (index % 2) * 90;
+  const sunGradient = context.createRadialGradient(sunX, sunY, 8, sunX, sunY, 115);
+  sunGradient.addColorStop(0, '#fff1bd');
+  sunGradient.addColorStop(0.28, accent);
+  sunGradient.addColorStop(1, 'rgba(255,255,255,0)');
+  context.fillStyle = sunGradient;
+  context.beginPath();
+  context.arc(sunX, sunY, 115, 0, Math.PI * 2);
+  context.fill();
+
+  context.globalAlpha = 0.68;
+  context.fillStyle = shadow;
+  context.beginPath();
+  context.moveTo(0, 410);
+  context.bezierCurveTo(95, 290, 168, 350, 235, 430);
+  context.bezierCurveTo(320, 530, 405, 285, 512, 365);
+  context.lineTo(512, 512);
+  context.lineTo(0, 512);
+  context.closePath();
+  context.fill();
+
+  context.globalAlpha = 0.42;
+  context.strokeStyle = '#f6d9a9';
+  context.lineWidth = 5;
+  context.beginPath();
+  context.moveTo(24, 285);
+  context.bezierCurveTo(140, 220, 255, 300, 490, 185);
+  context.stroke();
+  context.globalAlpha = 1;
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), 4);
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function createDoorTexture(index) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 1024;
+  const context = canvas.getContext('2d');
+  const palettes = [
+    ['#704735', '#b98256', '#4b2d22'],
+    ['#5d5750', '#91877a', '#393530'],
+    ['#80583f', '#c28b58', '#553728'],
+    ['#5b6260', '#9ca39d', '#363b39']
+  ];
+  const [base, grain, shadow] = palettes[index % palettes.length];
+
+  const background = context.createLinearGradient(0, 0, 512, 0);
+  background.addColorStop(0, shadow);
+  background.addColorStop(0.18, base);
+  background.addColorStop(0.52, grain);
+  background.addColorStop(0.82, base);
+  background.addColorStop(1, shadow);
+  context.fillStyle = background;
+  context.fillRect(0, 0, 512, 1024);
+
+  context.globalAlpha = 0.28;
+  context.strokeStyle = '#d5a176';
+  context.lineWidth = 2;
+  for (let x = -200; x < 700; x += 24) {
+    context.beginPath();
+    context.moveTo(x, 0);
+    context.bezierCurveTo(x - 30, 220, x + 32, 480, x - 12, 1024);
+    context.stroke();
+  }
+
+  context.globalAlpha = 0.38;
+  context.strokeStyle = '#120c09';
+  context.lineWidth = 9;
+  context.strokeRect(62, 70, 388, 360);
+  context.strokeRect(82, 94, 348, 312);
+  context.strokeRect(62, 490, 388, 450);
+  context.strokeRect(82, 514, 348, 402);
+
+  context.globalAlpha = 0.48;
+  context.strokeStyle = '#d6ae7c';
+  context.lineWidth = 3;
+  context.strokeRect(72, 80, 368, 340);
+  context.strokeRect(72, 500, 368, 430);
+
+  context.globalAlpha = 0.22;
+  context.strokeStyle = '#f1c38a';
+  context.lineWidth = 2;
+  for (let x = 105; x < 430; x += 18) {
+    context.beginPath();
+    context.moveTo(x, 125);
+    context.lineTo(x, 390);
+    context.moveTo(x, 540);
+    context.lineTo(x, 890);
+    context.stroke();
+  }
+  context.globalAlpha = 1;
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), 4);
+  texture.wrapS = THREE.ClampToEdgeWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function createDoorReliefTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 1024;
+  const context = canvas.getContext('2d');
+  context.fillStyle = '#808080';
+  context.fillRect(0, 0, 512, 1024);
+  context.strokeStyle = '#d0d0d0';
+  context.lineWidth = 12;
+  context.strokeRect(62, 70, 388, 360);
+  context.strokeRect(62, 490, 388, 450);
+  context.strokeStyle = '#505050';
+  context.lineWidth = 7;
+  context.strokeRect(82, 94, 348, 312);
+  context.strokeRect(82, 514, 348, 402);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.NoColorSpace;
+  texture.anisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), 4);
+  return texture;
+}
+
+function createDoorRoughnessTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 1024;
+  const context = canvas.getContext('2d');
+  context.fillStyle = '#8a8a8a';
+  context.fillRect(0, 0, 512, 1024);
+  context.globalAlpha = 0.28;
+  context.strokeStyle = '#424242';
+  context.lineWidth = 5;
+  for (let x = -200; x < 700; x += 21) {
+    context.beginPath();
+    context.moveTo(x, 0);
+    context.bezierCurveTo(x - 24, 220, x + 28, 480, x - 14, 1024);
+    context.stroke();
+  }
+  context.globalAlpha = 1;
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.NoColorSpace;
+  texture.anisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), 4);
+  return texture;
+}
+
+function createMaterialVariationTexture(width, height, baseValue, variation, seed) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d');
+  const image = context.createImageData(width, height);
+  for (let index = 0; index < image.data.length; index += 4) {
+    const pixel = index / 4;
+    const x = pixel % width;
+    const y = Math.floor(pixel / width);
+    const wave = Math.sin((x + seed * 17) * 0.12) * 0.5 + Math.sin((y - seed * 11) * 0.045) * 0.5;
+    const value = Math.max(0, Math.min(255, baseValue + wave * variation));
+    image.data[index] = value;
+    image.data[index + 1] = value;
+    image.data[index + 2] = value;
+    image.data[index + 3] = 255;
+  }
+  context.putImageData(image, 0, 0);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.NoColorSpace;
+  texture.anisotropy = Math.min(renderer.capabilities.getMaxAnisotropy(), 4);
+  return texture;
+}
+
+function enhanceLivingRoomDetails(root) {
+  const artworkTextures = Array.from({ length: 6 }, (_, index) => createArtworkTexture(index));
+  const doorTextures = Array.from({ length: 4 }, (_, index) => createDoorTexture(index));
+  const doorReliefTexture = createDoorReliefTexture();
+  const doorRoughnessTexture = createDoorRoughnessTexture();
+  const sofaRoughnessTexture = createMaterialVariationTexture(256, 256, 172, 18, 3);
+  const cabinetRoughnessTexture = createMaterialVariationTexture(256, 256, 138, 22, 7);
+  let artworkIndex = 0;
+  let doorIndex = 0;
+  const artworkMeshes = [];
+  root.updateWorldMatrix(true, true);
+
+  root.traverse((object) => {
+    if (!object.isMesh || !object.material) return;
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    const objectName = (object.name || '').toLowerCase();
+    const hierarchyName = getFullHierarchyName(object).toLowerCase();
+    const enhancedMaterials = materials.map((material) => {
+      const name = (material.name || '').toLowerCase();
+      const enhanced = material.clone();
+      const isDoorSill = (
+        (objectName.includes('sill') || objectName.includes('threshold') || objectName.includes('schwelle') ||
+          name.includes('sill') || name.includes('threshold'))
+      );
+
+      const isSofa = hierarchyName.includes('sofa');
+      const isCupboard = hierarchyName.includes('wardrobe') || hierarchyName.includes('cabinet kit') ||
+        objectName.includes('wardrobe') || objectName.includes('cabinet');
+      const isPlant = hierarchyName.includes('plant') || hierarchyName.includes('vegetation') ||
+        objectName.includes('inside plant') || name.includes('vegetacao') || name.includes('vegetation');
+
+      if (isSofa) {
+        enhanced.roughness = name.includes('leather') ? 0.38 : 0.82;
+        enhanced.metalness = 0.0;
+        enhanced.envMapIntensity = 0.18;
+        enhanced.roughnessMap = sofaRoughnessTexture;
+        if (enhanced.color && !name.includes('leather')) enhanced.color.multiplyScalar(0.88);
+      } else if (isCupboard) {
+        enhanced.roughness = 0.3;
+        enhanced.metalness = 0.04;
+        enhanced.envMapIntensity = 0.34;
+        enhanced.roughnessMap = cabinetRoughnessTexture;
+        if (enhanced.color) enhanced.color.multiplyScalar(0.9);
+      } else if (isPlant) {
+        enhanced.roughness = 0.62;
+        enhanced.metalness = 0.0;
+        enhanced.envMapIntensity = 0.16;
+        enhanced.side = THREE.DoubleSide;
+        if (enhanced.color) enhanced.color.multiplyScalar(0.9);
+      } else if (name.includes('door - panel') || (hierarchyName.includes('door') && !isDoorSill && (
+        objectName.includes('panel') || name.includes('door')
+      ))) {
+        const textureIndex = doorIndex % doorTextures.length;
+        enhanced.map = doorTextures[textureIndex];
+        enhanced.bumpMap = doorReliefTexture;
+        enhanced.roughnessMap = doorRoughnessTexture;
+        enhanced.bumpScale = 0.018;
+        enhanced.roughness = 0.34;
+        enhanced.metalness = 0.02;
+        enhanced.envMapIntensity = 0.38;
+        if (enhanced.color) enhanced.color.set('#ffffff');
+        doorIndex += 1;
+      } else if (isDoorSill) {
+        const textureIndex = Math.max(doorIndex - 1, 0) % doorTextures.length;
+        enhanced.map = doorTextures[textureIndex];
+        enhanced.bumpMap = doorReliefTexture;
+        enhanced.roughnessMap = doorRoughnessTexture;
+        enhanced.bumpScale = 0.012;
+        enhanced.roughness = 0.3;
+        enhanced.metalness = 0.04;
+        enhanced.envMapIntensity = 0.42;
+        if (enhanced.color) enhanced.color.set('#ffffff');
+      } else if (name.includes('door - architrave') || name.includes('door - frame')) {
+        enhanced.roughness = 0.24;
+        enhanced.metalness = 0.04;
+        enhanced.envMapIntensity = 0.38;
+      } else if (name.includes('door - handle')) {
+        enhanced.roughness = 0.12;
+        enhanced.metalness = 0.92;
+        enhanced.envMapIntensity = 0.7;
+      } else if (name.includes('window frame') || name.includes('mullion')) {
+        enhanced.roughness = 0.2;
+        enhanced.metalness = 0.78;
+        enhanced.envMapIntensity = 0.6;
+      } else if (name.includes('glass') || name.includes('vidro')) {
+        enhanced.roughness = 0.025;
+        enhanced.metalness = 0.05;
+        enhanced.envMapIntensity = 0.85;
+      } else if (name.includes('quadro')) {
+        enhanced.roughness = 0.72;
+        enhanced.metalness = 0.01;
+        enhanced.envMapIntensity = 0.18;
+        const artworkTexture = artworkTextures[artworkIndex % artworkTextures.length];
+        enhanced.map = artworkTexture;
+        artworkMeshes.push({ object, texture: artworkTexture });
+        artworkIndex += 1;
+      } else if (name.includes('frame')) {
+        enhanced.roughness = 0.3;
+        enhanced.metalness = 0.72;
+        enhanced.envMapIntensity = 0.5;
+      } else if (name.includes('kintsugi')) {
+        enhanced.roughness = 0.18;
+        enhanced.metalness = 0.18;
+        enhanced.envMapIntensity = 0.42;
+      } else if (name.includes('jar') || name.includes('vaso')) {
+        enhanced.roughness = 0.26;
+        enhanced.metalness = 0.05;
+        enhanced.envMapIntensity = 0.32;
+      }
+
+      return enhanced;
+    });
+    object.material = Array.isArray(object.material) ? enhancedMaterials : enhancedMaterials[0];
+  });
+
+  artworkMeshes.slice(0, 6).forEach(({ object: artwork, texture }) => {
+    const bounds = new THREE.Box3().setFromObject(artwork);
+    const size = bounds.getSize(new THREE.Vector3());
+    const center = bounds.getCenter(new THREE.Vector3());
+    root.worldToLocal(center);
+    const thinAxis = ['x', 'y', 'z'].reduce((smallest, axis) =>
+      size[axis] < size[smallest] ? axis : smallest, 'x');
+    const depth = Math.max(size[thinAxis], 0.02);
+    const planeWidth = thinAxis === 'x' ? size.z : size.x;
+    const planeHeight = thinAxis === 'y' ? size.z : size.y;
+    const painting = new THREE.Mesh(
+      new THREE.PlaneGeometry(
+        Math.max(planeWidth * 0.86, 0.05),
+        Math.max(planeHeight * 0.86, 0.05)
+      ),
+      new THREE.MeshStandardMaterial({
+        color: '#ffffff',
+        map: texture,
+        emissive: '#33291f',
+        emissiveMap: texture,
+        emissiveIntensity: 0.12,
+        roughness: 0.78,
+        metalness: 0.0,
+        side: THREE.DoubleSide,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -1
+      })
+    );
+    painting.position.copy(center);
+    if (thinAxis === 'x') painting.rotation.y = Math.PI / 2;
+    if (thinAxis === 'y') painting.rotation.x = -Math.PI / 2;
+    painting.position[thinAxis] += depth * 0.6;
+    painting.castShadow = false;
+    painting.receiveShadow = false;
+    root.add(painting);
+    const reversePainting = painting.clone();
+    reversePainting.position.copy(center);
+    reversePainting.position[thinAxis] -= depth * 0.6;
+    root.add(reversePainting);
+
+    const artworkLight = new THREE.PointLight('#fff4df', 0.16, 3.2, 2);
+    artworkLight.position.set(center.x, center.y + 0.65, center.z + 0.3);
+    artworkLight.castShadow = false;
+    root.add(artworkLight);
+  });
 }
 
 async function loadAndAssembleModels() {
@@ -2033,12 +2619,12 @@ async function loadAndAssembleModels() {
     buildingModel = buildingGltf.scene;
     buildingGroup.add(buildingModel);
 
-    // 2. Load Penthouse GLB (Tier 2 - Luxury Furnished Suite)
-    loaderStatusText.textContent = 'Loading Furnished Penthouse Suite (7 MB)...';
+    // 2. Load the furnished living room replacement for the top floor.
+    loaderStatusText.textContent = 'Loading Photorealistic Living Room (36 MB)...';
 
     const topFloorGltf = await new Promise((resolve, reject) => {
       gltfLoader.load(
-        `${modelBase}models/top_floor.glb`,
+        `${modelBase}models/Living room.glb`,
         resolve,
         (xhr) => {
           topFloorLoaded = xhr.loaded;
@@ -2051,9 +2637,10 @@ async function loadAndAssembleModels() {
     topFloorModel = topFloorGltf.scene;
     topFloorModel.traverse((child) => {
       if (child.isMesh) {
-        setupMeshProperties(child, true); // true = Interior penthouse suite
+        setupMeshProperties(child, true, true); // Preserve the living-room GLB's authored PBR materials.
       }
     });
+    enhanceLivingRoomDetails(topFloorModel);
 
     topFloorModel.position.copy(PENTHOUSE_ALIGNMENT_OFFSET);
     buildingGroup.add(topFloorModel);
@@ -2076,7 +2663,7 @@ async function loadAndAssembleModels() {
     window.roofCapGroup = roofCapGroup;
 
     // 3. Separate Roof Cap (Tier 3) and hide ONLY duplicate Floor 10 nodes (leaving Floors 0 to 9 100% intact!)
-    // Capture real BIM node names in top_floor.glb (ignoring Three.js internal 'mesh_X' names!)
+    // Capture real BIM node names in the replacement living-room GLB.
     const realTopNames = new Set();
     topFloorModel.traverse((child) => {
       if (child.name && !child.name.startsWith('mesh_')) {
@@ -2124,6 +2711,8 @@ async function loadAndAssembleModels() {
         }
       }
     });
+
+    await initializeWebGPUPathTracer();
 
     // 4. Center Scene on the Building Tower Core
     buildingGroup.position.set(19.896, 5.0, -6.5943);
@@ -2686,6 +3275,10 @@ function updateWalkthroughCameraHeight() {
 
 function enterWalkthroughMode(nodeKey = 'flatA_living') {
   isWalkthroughMode = true;
+  setInteriorRenderingEnabled(true);
+  if (enableWebGPUPathTracing && webgpuPathTracerReady) {
+    webgpuPathTracerCanvas.style.display = 'block';
+  }
   controls.enabled = false;
 
   // GPU ACCELERATION FOR INTEGRATED GRAPHICS:
@@ -2723,6 +3316,23 @@ function enterWalkthroughMode(nodeKey = 'flatA_living') {
   mainControlPanel.classList.add('hidden-walkthrough');
   canvas.classList.add('canvas-look-grab');
 
+  if (enableWebGPUPathTracing && webgpuPathTracerReady) {
+    try {
+      prepareSceneForWebGPUPathTracing();
+      const rasterEnvironment = scene.environment;
+      const rasterBackground = scene.background;
+      if (interiorBackground) scene.environment = interiorBackground;
+      if (interiorBackground) scene.background = interiorBackground;
+      webgpuPathTracer.setScene(scene, camera);
+      scene.environment = rasterEnvironment;
+      scene.background = rasterBackground;
+    } catch (error) {
+      scene.environment = interiorEnvironment;
+      webgpuPathTracerReady = false;
+      webgpuPathTracerCanvas.style.display = 'none';
+      console.warn('WebGPU path tracing could not prepare this scene; using WebGL.', error);
+    }
+  }
   navigateToNode(nodeKey, true);
 }
 
@@ -2732,6 +3342,8 @@ window.navigateToNode = navigateToNode;
 
 function exitWalkthroughMode(shouldFlyToPreset = true) {
   isWalkthroughMode = false;
+  setInteriorRenderingEnabled(false);
+  if (webgpuPathTracerCanvas) webgpuPathTracerCanvas.style.display = 'none';
   controls.enabled = true;
   clearDoorPortals();
 
@@ -3289,6 +3901,16 @@ function animate(time) {
       -Math.cos(lookYaw) * Math.cos(lookPitch)
     );
     camera.lookAt(camera.position.clone().add(forward));
+    if (webgpuPathTracerReady && (
+      !hasPathTracerCameraState ||
+      camera.position.distanceToSquared(lastPathTracerCameraPosition) > 0.0001 ||
+      1 - Math.abs(camera.quaternion.dot(lastPathTracerCameraQuaternion)) > 0.00001
+    )) {
+      webgpuPathTracer.updateCamera();
+      lastPathTracerCameraPosition.copy(camera.position);
+      lastPathTracerCameraQuaternion.copy(camera.quaternion);
+      hasPathTracerCameraState = true;
+    }
 
     // Handle WASD / Arrow Keys free walking
     updateFreeWalking();
@@ -3317,7 +3939,13 @@ function animate(time) {
   }
 
   updateHotspots();
-  renderer.render(scene, camera);
+  if (isInteriorRendering && enableWebGPUPathTracing && webgpuPathTracerReady) {
+    webgpuPathTracer.renderSample();
+  } else if (isInteriorRendering && useInteriorPostProcessing) {
+    composer.render();
+  } else {
+    renderer.render(scene, camera);
+  }
 
   // FPS calculation
   frameCount++;
@@ -3338,5 +3966,11 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
+  smaaPass.setSize(window.innerWidth * renderer.getPixelRatio(), window.innerHeight * renderer.getPixelRatio());
+  if (webgpuPathTracerRenderer) {
+    webgpuPathTracerRenderer.setSize(window.innerWidth, window.innerHeight);
+    webgpuPathTracer?.setSize(window.innerWidth, window.innerHeight);
+  }
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
 });

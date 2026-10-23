@@ -89,7 +89,9 @@ The production output is generated in the `dist/` directory, optimized with rela
 ├── public/
 │   └── models/
 │       ├── building.glb       # 13-story architectural building model (41 MB)
-│       └── top_floor.glb      # Furnished penthouse floor & rooms (7 MB)
+│       └── Living room.glb    # Photorealistic furnished top-floor replacement
+│   └── hdri/
+│       └── hotel_room_1k.hdr  # Poly Haven architectural interior HDRI
 ├── src/
 │   ├── main.js                # Three.js pipeline, Lenis scroll engine & walkthrough tour
 │   └── style.css              # Glassmorphic UI design system, cards, & responsive HUD
